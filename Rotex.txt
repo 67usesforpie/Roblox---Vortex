@@ -1,0 +1,145 @@
+-- script originally by slimeking (kid), and mocha (filenotfound)
+-- updated version by searching2001 on Discord, or gforceaddict on Vortex/Github
+
+-- ==== Config ====
+local WEDGE_STEPS = 8   -- more steps = smoother ramp, more parts
+local SPHERE_STEPS = 12 -- more steps = rounder sphere, more parts
+
+local rawData = ""
+local spawnDone = false
+
+-- Converts a world CFrame + Size into an addStud(...) line (same math as the original script)
+local function serializeBox(size, cf)
+	local hexColor = "0xFFFFFF" -- overwritten by caller with real color
+	local posX, posY, posZ = cf.Position.X, cf.Position.Y - ((size.Y / 2) + 0.5 - 47), cf.Position.Z
+	local rotX, rotY, rotZ = cf:ToEulerAnglesXYZ()
+	return posX, posY, posZ, rotX, rotY, rotZ
+end
+
+local function addStudLine(size, cf, hexColor)
+	local posX, posY, posZ, rotX, rotY, rotZ = serializeBox(size, cf)
+	return string.format(
+		"addStud(%g, %g, %g, %s, %g, %g, %g, %g, %g, %g);",
+		size.X, size.Y, size.Z, hexColor, posX, posY, posZ, rotX, rotY, rotZ
+	)
+end
+
+-- Decomposes a wedge into a staircase of boxes along its slope (Z axis).
+-- Assumes standard Roblox wedge orientation: full height at -Z, sloping to 0 height at +Z.
+local function decomposeWedge(part)
+	local sx, sy, sz = part.Size.X, part.Size.Y, part.Size.Z
+	local hexColor = "0x" .. part.Color:ToHex()
+	local lines = {}
+
+	for i = 0, WEDGE_STEPS - 1 do
+		local zStart = -sz / 2 + i * (sz / WEDGE_STEPS)
+		local zEnd = zStart + (sz / WEDGE_STEPS)
+		local zCenter = (zStart + zEnd) / 2
+
+		-- Use the far (+Z) edge height so the box stays inscribed under the slope
+		local heightFrac = 1 - ((zEnd + sz / 2) / sz)
+		local stepHeight = sy * heightFrac
+
+		if stepHeight > 0.05 then -- skip near-zero slivers at the thin end
+			local centerYLocal = -sy / 2 + stepHeight / 2
+			local localOffset = CFrame.new(0, centerYLocal, zCenter)
+			local worldCF = part.CFrame * localOffset
+			local boxSize = Vector3.new(sx, stepHeight, sz / WEDGE_STEPS)
+			table.insert(lines, addStudLine(boxSize, worldCF, hexColor))
+		end
+	end
+
+	return lines
+end
+
+-- Decomposes a sphere/ellipsoid into stacked horizontal box slices.
+local function decomposeSphere(part)
+	local rx, ry, rz = part.Size.X / 2, part.Size.Y / 2, part.Size.Z / 2
+	local hexColor = "0x" .. part.Color:ToHex()
+	local lines = {}
+
+	for i = 0, SPHERE_STEPS - 1 do
+		local yStart = -ry + i * (2 * ry / SPHERE_STEPS)
+		local yEnd = yStart + (2 * ry / SPHERE_STEPS)
+		local yCenter = (yStart + yEnd) / 2
+
+		-- Use the layer's outer edge (largest |y|) so the box stays inside the sphere
+		local yEdge = math.max(math.abs(yStart), math.abs(yEnd))
+		local frac = 1 - (yEdge / ry) ^ 2
+		if frac > 0 then
+			local scale = math.sqrt(frac)
+			local sliceX = 2 * rx * scale
+			local sliceZ = 2 * rz * scale
+			local sliceY = yEnd - yStart
+
+			if sliceX > 0.05 and sliceZ > 0.05 then
+				local localOffset = CFrame.new(0, yCenter, 0)
+				local worldCF = part.CFrame * localOffset
+				local boxSize = Vector3.new(sliceX, sliceY, sliceZ)
+				table.insert(lines, addStudLine(boxSize, worldCF, hexColor))
+			end
+		end
+	end
+
+	return lines
+end
+
+-- Classifies a part's shape so we know how to export it
+local function classifyPart(part)
+	if part:IsA("WedgePart") then
+		return "wedge"
+	elseif part:IsA("Part") then
+		if part.Shape == Enum.PartType.Ball then
+			return "sphere"
+		elseif part.Shape == Enum.PartType.Wedge then
+			return "wedge"
+		else
+			return "block" -- Block, Cylinder, CornerWedge fall back to bounding box for now
+		end
+	end
+	return nil
+end
+
+for _, part in ipairs(workspace:GetDescendants()) do
+	if part:IsA("BasePart") and not part:IsA("Terrain") and not part:IsA("SpawnLocation") then
+		local shapeType = classifyPart(part)
+
+		if shapeType == "wedge" then
+			for _, line in ipairs(decomposeWedge(part)) do
+				rawData = rawData .. line .. "\n"
+			end
+		elseif shapeType == "sphere" then
+			for _, line in ipairs(decomposeSphere(part)) do
+				rawData = rawData .. line .. "\n"
+			end
+		elseif shapeType == "block" then
+			local hexColor = "0" .. "x" .. part.Color:ToHex()
+			rawData = rawData .. addStudLine(part.Size, part.CFrame, hexColor) .. "\n"
+		end
+	end
+
+	if part.ClassName == "SpawnLocation" and spawnDone == false and not part:IsA("Terrain") then
+		local hexColor = "0x" .. part.Color:ToHex()
+		local formattedString = addStudLine(part.Size, part.CFrame, hexColor)
+
+		local spwnX = part.Position.X
+		local spwnY = part.Position.Y + (part.Size.Y / 2) + 52
+		local spwnZ = part.Position.Z
+		local spawnLocation = string.format("character.position.x = %g, character.position.y = %g, character.position.z = %g", spwnX, spwnY, spwnZ)
+
+		rawData = rawData .. formattedString .. "\n" .. spawnLocation .. "\n"
+		spawnDone = true
+	end
+end
+
+if spawnDone == false then
+	rawData = rawData .. "character.position.x = 0, character.position.y = 50, character.position.z = 0" .. "\n"
+end
+
+local outputValue = Instance.new("StringValue")
+outputValue.Name = "RAW_PART_DATA"
+outputValue.Value = rawData
+outputValue.Parent = workspace
+
+print("Successfully launched")
+-- Main version
